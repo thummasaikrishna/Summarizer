@@ -8,6 +8,7 @@ import logging
 from langchain.prompts import PromptTemplate
 from langchain_groq import ChatGroq
 from langchain.chains.summarize import load_summarize_chain
+from langchain.chains import LLMChain
 from langchain_community.document_loaders import UnstructuredURLLoader
 from yt_dlp import YoutubeDL
 from langchain.schema import Document
@@ -23,7 +24,11 @@ import base64
 from youtube_transcript_api import YouTubeTranscriptApi
 from urllib.parse import parse_qs, urlparse
 import json
-from mindmap_utils import add_mindmap_section
+import random
+import string
+import streamlit.components.v1 as components
+import hashlib
+
 
 # Set up logging for debugging
 logging.basicConfig(level=logging.INFO)
@@ -437,6 +442,8 @@ else:
         st.session_state.audio_file = None
     if "pdf_bytes" not in st.session_state:
         st.session_state.pdf_bytes = None
+    if "mindmap_data" not in st.session_state:
+        st.session_state.mindmap_data = None
     st.title("Multi-Source Content Summarizer")
     st.write("Summarize content from YouTube videos or websites in your preferred language and length.")
 
@@ -624,6 +631,273 @@ else:
     """
 
     prompt = PromptTemplate(template=SUMMARY_PROMPT, input_variables=["text", "language", "word_count"])
+    # ------ VISUAL MINDMAP GENERATOR FUNCTIONS ------
+    def generate_mindmap_data(llm, summary, title="Content Summary"):
+        """
+        Generate a visual mind map structure from a summary using an LLM.
+        
+        Args:
+            llm: Language model to use
+            summary: Text summary to convert into a mind map
+            title: Central node title
+            
+        Returns:
+            JSON data for the mind map
+        """
+        # Template for mind map generation
+        mindmap_template = """
+        Analyze the following summary and create a visual mind map structure in JSON format.
+        
+        SUMMARY:
+        {summary}
+    
+        TASK:
+        Extract the most important concepts from the summary and organize them into a visual mind map structure.
+        
+        The mind map should be structured with:
+        1. A central node (the main topic: "{title}")
+        2. 4-6 main branches (primary concepts/themes from the summary)
+        3. 2-4 sub-branches per main branch (supporting details, examples, or sub-concepts)
+        
+        INSTRUCTIONS:
+        - Keep node text concise (3-5 words max per node)
+        - Choose visually distinct concepts for main branches
+        - Use short, impactful phrases
+        - Create a balanced structure
+        
+        RESPONSE FORMAT:
+        Return ONLY a JSON object structured like this:
+        {{
+        "root": {{
+            "name": "Main Topic",
+            "children": [
+            {{
+                "name": "Branch 1",
+                "children": [
+                {{"name": "Sub-topic 1.1"}},
+                {{"name": "Sub-topic 1.2"}}
+                ]
+            }},
+            {{
+                "name": "Branch 2",
+                "children": [
+                {{"name": "Sub-topic 2.1"}},
+                {{"name": "Sub-topic 2.2"}}
+                ]
+            }}
+            ]
+        }}
+        }}
+        
+        Return ONLY the valid JSON object, nothing else.
+        """
+    
+        prompt = PromptTemplate(
+            input_variables=["summary", "title"],
+            template=mindmap_template
+        )
+    
+        # Create and run the chain
+        chain = LLMChain(llm=llm, prompt=prompt)
+        result = chain.run(summary=summary, title=title)
+        
+        # Clean the result to ensure it's valid JSON
+        result = result.strip()
+        # Remove any markdown code blocks if present
+        result = re.sub(r'```json\s*|\s*```', '', result)
+        result = re.sub(r'```\s*|\s*```', '', result)
+        
+        try:
+            # Parse the JSON
+            mindmap_data = json.loads(result)
+            return mindmap_data
+        except json.JSONDecodeError as e:
+            # If JSON is invalid, create a simple structure
+            return {
+                "root": {
+                    "name": title,
+                    "children": [
+                        {"name": "Key Point 1", "children": [{"name": "Detail 1.1"}, {"name": "Detail 1.2"}]},
+                        {"name": "Key Point 2", "children": [{"name": "Detail 2.1"}, {"name": "Detail 2.2"}]}
+                    ]
+                }
+            }
+
+    def render_visual_mindmap(mindmap_data, height=500):
+        """
+        Render a visual mind map in Streamlit using D3.js.
+        
+        Args:
+            mindmap_data: JSON data for the mind map
+            height: Height of the rendered component
+        """
+        # Generate a unique ID for this mindmap
+        mindmap_id = "mindmap_" + hashlib.md5(str(datetime.now()).encode()).hexdigest()[:8]
+        
+        # Convert the mindmap data to a JSON string
+        mindmap_json = json.dumps(mindmap_data)
+        
+        # D3.js and custom styling for the mindmap
+        html = f"""
+        <!DOCTYPE html>
+        <html>
+        <head>
+            <meta charset="UTF-8">
+            <script src="https://d3js.org/d3.v7.min.js"></script>
+            <style>
+                #{mindmap_id} {{
+                    width: 100%;
+                    height: {height}px;
+                    overflow: hidden;
+                    margin: 0 auto;
+                    font-family: Arial, sans-serif;
+                }}
+                .node circle {{
+                    fill: #fff;
+                    stroke: #4682B4;
+                    stroke-width: 3px;
+                    cursor: pointer;
+                }}
+                .node text {{
+                    font: 14px sans-serif;
+                }}
+                .link {{
+                    fill: none;
+                    stroke: #ccc;
+                    stroke-width: 2px;
+                }}
+                .root-node circle {{
+                    fill: #4682B4;
+                    stroke: #2E5984;
+                    stroke-width: 3px;
+                }}
+                .root-node text {{
+                    font-weight: bold;
+                    font-size: 16px;
+                }}
+                .main-branch circle {{
+                    fill: #fff;
+                    stroke: #5F9EA0;
+                    stroke-width: 2.5px;
+                }}
+                .sub-branch circle {{
+                    fill: #fff;
+                    stroke: #87CEEB;
+                    stroke-width: 2px;
+                }}
+                .tooltip {{
+                    position: absolute;
+                    text-align: center;
+                    padding: 8px;
+                    font: 12px sans-serif;
+                    background: #f9f9f9;
+                    border: 1px solid #ccc;
+                    border-radius: 5px;
+                    pointer-events: none;
+                    opacity: 0;
+                    transition: opacity 0.3s;
+                }}
+            </style>
+        </head>
+        <body>
+            <div id="{mindmap_id}"></div>
+            <script>
+            (function() {{
+                // Parse the data
+                const data = {mindmap_json};
+                
+                // Set up the SVG container
+                const width = document.getElementById('{mindmap_id}').clientWidth;
+                const height = {height};
+                const margin = {{top: 20, right: 90, bottom: 20, left: 90}};
+                
+                // Create a tooltip div
+                const tooltip = d3.select("#{mindmap_id}")
+                    .append("div")
+                    .attr("class", "tooltip");
+                
+                const svg = d3.select("#{mindmap_id}")
+                    .append("svg")
+                    .attr("width", width)
+                    .attr("height", height)
+                    .append("g")
+                    .attr("transform", `translate(${{margin.left}},${{margin.top}})`);
+                
+                // Create a tree layout
+                const treeWidth = width - margin.left - margin.right;
+                const treeHeight = height - margin.top - margin.bottom;
+                const treeLayout = d3.tree().size([treeHeight, treeWidth]);
+                
+                // Create a hierarchy from the data
+                const root = d3.hierarchy(data.root);
+                
+                // Assign position to nodes
+                treeLayout(root);
+                
+                // Create links
+                svg.selectAll(".link")
+                    .data(root.links())
+                    .join("path")
+                    .attr("class", "link")
+                    .attr("d", d3.linkHorizontal()
+                        .x(d => d.y)
+                        .y(d => d.x)
+                    );
+                
+                // Create nodes
+                const node = svg.selectAll(".node")
+                    .data(root.descendants())
+                    .join("g")
+                    .attr("class", d => {{
+                        if (d.depth === 0) return "node root-node";
+                        if (d.depth === 1) return "node main-branch";
+                        return "node sub-branch";
+                    }})
+                    .attr("transform", d => `translate(${{d.y}},${{d.x}})`)
+                    .on("mouseover", function(event, d) {{
+                        tooltip.transition()
+                            .duration(200)
+                            .style("opacity", .9);
+                        tooltip.html(d.data.name)
+                            .style("left", (event.pageX) + "px")
+                            .style("top", (event.pageY - 28) + "px");
+                    }})
+                    .on("mouseout", function(d) {{
+                        tooltip.transition()
+                            .duration(500)
+                            .style("opacity", 0);
+                    }});
+                
+                // Add circles to nodes
+                node.append("circle")
+                    .attr("r", d => d.depth === 0 ? 25 : (d.depth === 1 ? 15 : 10));
+                
+                // Add text labels
+                node.append("text")
+                    .attr("dy", ".35em")
+                    .attr("x", d => d.children ? -13 : 13)
+                    .style("text-anchor", d => d.children ? "end" : "start")
+                    .text(d => d.data.name);
+                
+                // Add zoom capability
+                const zoom = d3.zoom()
+                    .scaleExtent([0.5, 2])
+                    .on("zoom", (event) => {{
+                        svg.attr("transform", event.transform);
+                    }});
+                
+                d3.select("#{mindmap_id} svg")
+                    .call(zoom);
+            }})();
+            </script>
+        </body>
+        </html>
+        """
+        
+        # Render the HTML
+        components.html(html, height=height+50)
+
+    # ------ END OF VISUAL MINDMAP GENERATOR FUNCTIONS ------
 
     # IMPROVED AUDIO GENERATION FUNCTION WITH BETTER ERROR HANDLING
     def create_audio(text: str, language_code: str) -> str:
@@ -969,6 +1243,16 @@ else:
                             content_title = "Web Content"
                     
                     st.session_state.content_title = content_title
+                    with st.spinner("Creating visual mind map..."):
+                        try:
+                            mindmap_data = generate_mindmap_data(
+                                llm=llm,
+                                summary=summary,
+                                title=content_title[:30] if len(content_title) > 30 else content_title
+                            )
+                            st.session_state.mindmap_data = mindmap_data
+                        except Exception as e:
+                            st.warning(f"Could not generate mind map: {str(e)}")
                     #Generate audio for the summary
                     with st.spinner("Generating audio..."):
                             audio_file = create_audio(summary, LANGUAGES[selected_language])
@@ -991,7 +1275,14 @@ else:
         actual_word_count = count_words(st.session_state.summary)
         st.info(f"Word count: {actual_word_count} words")
     # Display audio player if audio file exists
-
+    if st.session_state.mindmap_data:
+        st.subheader("Mind Map Visualization:")
+        render_visual_mindmap(st.session_state.mindmap_data, height=500)
+        
+        # Add explanation and instructions
+        st.info("📋 This interactive mind map shows the key concepts from the summary. You can zoom and pan to explore, and hover over nodes for details.")
+        st.caption("Tip: Click and drag to move around, scroll to zoom in/out.")
+        
     if st.session_state.audio_file:
         st.subheader("Listen to Summary:")
         st.audio(st.session_state.audio_file, format='audio/mp3')
@@ -1011,11 +1302,7 @@ else:
         url=st.session_state.url,
         )
         current_timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        add_mindmap_section(
-            summary_text=st.session_state["summary"],
-            dark_mode=st.session_state["dark_mode"],
-            timestamp=current_timestamp
-        )
+        
     # Chat Interface
     st.markdown("<h3 class='chat-header'>Chat with AI</h3>", unsafe_allow_html=True)
     st.write(f"Ask any questions about the summary! (Responses will be in {st.session_state.selected_language})")
